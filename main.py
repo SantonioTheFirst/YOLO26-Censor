@@ -4,192 +4,150 @@ import numpy as np
 from PIL import Image
 import io
 import os
-import logging
 from ultralytics import YOLO
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Константы и настройки ---
+FACE_MODEL_PATH = "yolo26n-face.pt"
+NSFW_MODEL_PATH = "yolo26n-nsfw.pt"
 
-# --- Настройка страницы ---
-st.set_page_config(
-    page_title="AI Privacy & Censor Tool",
-    page_icon="🛡️",
-    layout="wide"
-)
-
-# --- 1. Инициализация и Кэширование Моделей ---
-# @st.cache_resource гарантирует, что модели загрузятся 1 раз и будут висеть в памяти
-@st.cache_resource(show_spinner="Загрузка моделей YOLO в память...")
-def load_models():
-    models = {}
+# --- 1. Кэширование моделей (Чистая функция без st.* элементов) ---
+@st.cache_resource(show_spinner="Загрузка нейросетей в память...")
+def load_ai_models():
+    results = {"models": {}, "status": {}}
+    
+    # Загрузка модели лиц
     try:
-        # Пытаемся загрузить модели. 
-        # В реальном проекте здесь лежат yolo26n-face.pt и yolo26n-nsfw.pt
-        if os.path.exists("yolo26n-face.pt"):
-            models['face'] = YOLO("yolo26n-face.pt")
+        if os.path.exists(FACE_MODEL_PATH):
+            results["models"]["face"] = YOLO(FACE_MODEL_PATH)
+            results["status"]["face"] = "custom"
         else:
-            # Фолбэк для MVP, если кастомной модели нет (используем стандартную)
-            models['face'] = YOLO("yolov8n.pt") 
-            st.toast("Модель лиц не найдена. Используется стандартная YOLOv8n (класс person).", icon="⚠️")
-
-        if os.path.exists("yolo26n-nsfw.pt"):
-            models['nsfw'] = YOLO("yolo26n-nsfw.pt")
-            
-        return models
+            # Фолбэк на стандартную модель, если кастомная не найдена
+            results["models"]["face"] = YOLO("yolov8n.pt")
+            results["status"]["face"] = "fallback"
     except Exception as e:
-        st.error(f"Ошибка загрузки моделей: {e}")
-        return {}
+        results["status"]["face"] = f"error: {str(e)}"
+
+    # Загрузка модели NSFW
+    try:
+        if os.path.exists(NSFW_MODEL_PATH):
+            results["models"]["nsfw"] = YOLO(NSFW_MODEL_PATH)
+            results["status"]["nsfw"] = "ready"
+        else:
+            results["status"]["nsfw"] = "missing"
+    except Exception as e:
+        results["status"]["nsfw"] = f"error: {str(e)}"
+        
+    return results
 
 # --- 2. Алгоритмы цензуры ---
-def apply_gaussian_blur(roi: np.ndarray, ratio: float) -> np.ndarray:
+def apply_pixelate(roi, intensity):
+    """Пикселизация: intensity (0.1 - 1.0), где 0.1 - очень крупные пиксели."""
     h, w = roi.shape[:2]
     if h == 0 or w == 0: return roi
-    min_dim = min(h, w)
-    k = int((ratio * min_dim) / 2) * 2 + 1
-    return cv2.GaussianBlur(roi, (k, k), 0) if k > 1 else roi
-
-def apply_pixelate(roi: np.ndarray, blocks: int) -> np.ndarray:
-    h, w = roi.shape[:2]
-    if h == 0 or w == 0: return roi
-    # Защита от слишком большого количества блоков
-    blocks = max(1, min(blocks, min(w, h)))
+    # Вычисляем количество блоков: чем меньше intensity, тем меньше блоков (крупнее пиксель)
+    blocks = int(max(2, 50 * intensity)) 
     temp = cv2.resize(roi, (blocks, blocks), interpolation=cv2.INTER_LINEAR)
     return cv2.resize(temp, (w, h), interpolation=cv2.INTER_NEAREST)
 
-def apply_solid_fill(roi: np.ndarray) -> np.ndarray:
-    return np.full_like(roi, (50, 50, 50)) # Темно-серый цвет в RGB
+def apply_blur(roi, intensity):
+    """Размытие по Гауссу."""
+    h, w = roi.shape[:2]
+    if h == 0 or w == 0: return roi
+    k_size = int((intensity * min(h, w)) // 2) * 2 + 1
+    return cv2.GaussianBlur(roi, (k_size, k_size), 0) if k_size > 1 else roi
 
-# --- 3. Основная логика обработки ---
-def process_image(image: Image.Image, models: dict, targets: list, conf: float, mode: str, intensity: float) -> Image.Image:
-    """Обрабатывает изображение: детекция -> цензура -> возврат результата."""
-    
-    # PIL Image (RGB) -> NumPy Array (RGB)
-    img_array = np.array(image)
-    
-    boxes_to_censor = []
+def apply_solid(roi):
+    """Сплошная заливка серым."""
+    return np.full_like(roi, (64, 64, 64))
 
-    # Детекция лиц
-    if "Лица" in targets and 'face' in models:
-        # Если используем стандартную YOLO, класс person = 0
-        face_cls = 0 
-        results = models['face'](img_array, conf=conf, verbose=False)
-        for r in results:
+# --- 3. Главная функция обработки ---
+def process_frame(image, models_dict, targets, conf, mode, intensity):
+    img_array = np.array(image) # PIL (RGB) -> NumPy (RGB)
+    h, w = img_array.shape[:2]
+    all_boxes = []
+
+    # Сбор рамок от модели лиц
+    if "Лица" in targets and "face" in models_dict:
+        # Для кастомной модели лиц класс обычно 0. Для yolov8n класс person тоже 0.
+        res = models_dict["face"](img_array, conf=conf, verbose=False)
+        for r in res:
             for box in r.boxes:
-                if int(box.cls[0]) == face_cls:
-                    boxes_to_censor.append(map(int, box.xyxy[0].tolist()))
+                if int(box.cls[0]) == 0:
+                    all_boxes.append(map(int, box.xyxy[0].tolist()))
 
-    # Детекция NSFW
-    if "NSFW" in targets and 'nsfw' in models:
-        nsfw_classes = [1, 2, 4] # Индексы классов NSFW
-        results = models['nsfw'](img_array, conf=conf, verbose=False)
-        for r in results:
+    # Сбор рамок от модели NSFW
+    if "NSFW" in targets and "nsfw" in models_dict:
+        res = models_dict["nsfw"](img_array, conf=conf, verbose=False)
+        for r in res:
             for box in r.boxes:
-                if int(box.cls[0]) in nsfw_classes:
-                    boxes_to_censor.append(map(int, box.xyxy[0].tolist()))
+                # Здесь нужно указать индексы классов твоей NSFW модели
+                # Например: [1, 2, 3] для разных типов контента
+                all_boxes.append(map(int, box.xyxy[0].tolist()))
 
-    # Применение цензуры (работаем с NumPy array in-place)
-    for x1, y1, x2, y2 in boxes_to_censor:
-        h, w = img_array.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        
-        if (x2 - x1) <= 0 or (y2 - y1) <= 0: continue
+    # Применение выбранного метода ко всем рамкам
+    for x1, y1, x2, y2 in all_boxes:
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1: continue
         
         roi = img_array[y1:y2, x1:x2]
         
-        if mode == "Размытие (Blur)":
-            img_array[y1:y2, x1:x2] = apply_gaussian_blur(roi, intensity)
-        elif mode == "Пикселизация (Pixelate)":
-            # Для пикселизации intensity это количество блоков (инвертируем логику: меньше интенсивность ползунка -> меньше блоков -> крупнее пиксели)
-            blocks = int(max(5, 50 * (1.1 - intensity))) 
-            img_array[y1:y2, x1:x2] = apply_pixelate(roi, blocks)
-        elif mode == "Сплошная заливка (Solid)":
-            img_array[y1:y2, x1:x2] = apply_solid_fill(roi)
+        if mode == "Pixelate":
+            img_array[y1:y2, x1:x2] = apply_pixelate(roi, intensity)
+        elif mode == "Blur":
+            img_array[y1:y2, x1:x2] = apply_blur(roi, intensity)
+        elif mode == "Solid":
+            img_array[y1:y2, x1:x2] = apply_solid(roi)
 
-    # NumPy Array (RGB) -> PIL Image
     return Image.fromarray(img_array)
 
-# --- 4. Веб-интерфейс (UI) ---
+# --- 4. Интерфейс Streamlit ---
 def main():
-    st.title("🛡️ AI Privacy Censor")
-    st.markdown("Инструмент для автоматической анонимизации изображений.")
+    st.set_page_config(page_title="AI Censor Tool", layout="wide")
+    st.title("🛡️ Universal AI Censor")
 
-    # Загружаем модели
-    models = load_models()
+    # Загрузка моделей
+    data = load_ai_models()
+    models = data["models"]
+    status = data["status"]
 
-    # --- Боковая панель (Настройки) ---
+    # Sidebar: Настройки
     with st.sidebar:
-        st.header("⚙️ Настройки детекции")
+        st.header("Настройки")
+        targets = st.multiselect("Что скрывать?", ["Лица", "NSFW"], default=["Лица"])
+        conf_val = st.slider("Confidence threshold", 0.1, 1.0, 0.4)
         
-        targets = st.multiselect(
-            "Что скрываем?",
-            ["Лица", "NSFW"],
-            default=["Лица"]
-        )
-        
-        conf_threshold = st.slider(
-            "Уверенность нейросети (Confidence)",
-            min_value=0.1, max_value=1.0, value=0.5, step=0.05,
-            help="Чем выше значение, тем меньше ложных срабатываний, но модель может пропустить некоторые объекты."
-        )
-
         st.divider()
-        st.header("🎨 Настройки цензуры")
-        
-        mode = st.radio(
-            "Режим работы",
-            ["Пикселизация (Pixelate)", "Размытие (Blur)", "Сплошная заливка (Solid)"]
-        )
-        
-        # Ползунок интенсивности меняет смысл в зависимости от режима
-        intensity = 0.5
-        if mode != "Сплошная заливка (Solid)":
-            intensity = st.slider(
-                "Интенсивность",
-                min_value=0.1, max_value=1.0, value=0.5, step=0.1,
-                help="Для размытия — сила фильтра. Для пикселизации — размер квадратов."
-            )
+        mode = st.radio("Метод цензуры", ["Pixelate", "Blur", "Solid"])
+        intensity = st.slider("Интенсивность", 0.1, 1.0, 0.3) if mode != "Solid" else 1.0
 
-    # --- Основной экран (Загрузка и результат) ---
-    uploaded_file = st.file_uploader("Загрузи изображение (JPG, PNG)", type=["jpg", "jpeg", "png"])
+        # Уведомления о статусе моделей
+        if status["face"] == "fallback":
+            st.warning("⚠️ Файл yolo26n-face.pt не найден. Используется базовая модель.")
+        if status["nsfw"] == "missing" and "NSFW" in targets:
+            st.error("❌ Модель NSFW не загружена (нет файла .pt)")
 
-    if uploaded_file is not None:
-        # Читаем изображение в PIL
-        image = Image.open(uploaded_file).convert('RGB')
+    # Main Area: Загрузка
+    uploaded_file = st.file_uploader("Загрузите фото", type=["jpg", "jpeg", "png"])
+
+    if uploaded_file:
+        input_img = Image.open(uploaded_file).convert("RGB")
         
-        # Создаем две колонки для сравнения
         col1, col2 = st.columns(2)
-        
         with col1:
             st.subheader("Оригинал")
-            st.image(image, use_container_width=True)
-
+            st.image(input_img, use_container_width=True)
+            
         with col2:
             st.subheader("Результат")
-            
-            if not targets:
-                st.info("Выбери объекты для скрытия в левом меню.")
-                st.image(image, use_container_width=True)
-            else:
-                with st.spinner("Обработка нейросетью..."):
-                    # Вызываем функцию обработки
-                    processed_image = process_image(image, models, targets, conf_threshold, mode, intensity)
-                    st.image(processed_image, use_container_width=True)
-
-                # --- Кнопка скачивания ---
-                # Конвертируем PIL Image обратно в байты для скачивания
+            with st.spinner("Нейросеть работает..."):
+                output_img = process_frame(input_img, models, targets, conf_val, mode, intensity)
+                st.image(output_img, use_container_width=True)
+                
+                # Кнопка скачивания
                 buf = io.BytesIO()
-                processed_image.save(buf, format="JPEG", quality=90)
-                byte_im = buf.getvalue()
-
-                st.download_button(
-                    label="⬇️ Скачать результат",
-                    data=byte_im,
-                    file_name=f"censored_{uploaded_file.name}",
-                    mime="image/jpeg",
-                    use_container_width=True
-                )
+                output_img.save(buf, format="JPEG", quality=90)
+                st.download_button("⬇️ Скачать результат", buf.getvalue(), f"censored_{uploaded_file.name}", "image/jpeg")
 
 if __name__ == "__main__":
     main()
+    
