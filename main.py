@@ -62,14 +62,14 @@ def apply_solid(roi):
 
 # --- 3. Главная функция обработки ---
 def process_frame(image, models_dict, targets, conf, mode, intensity):
-    img_array = image # PIL (RGB) -> NumPy (RGB)
+    img_array = np.array(image) # PIL (RGB) -> NumPy (RGB)
     h, w = img_array.shape[:2]
     all_boxes = []
 
     # Сбор рамок от модели лиц
     if "Лица" in targets and "face" in models_dict:
         # Для кастомной модели лиц класс обычно 0. Для yolov8n класс person тоже 0.
-        res = models_dict["face"](img_array, conf=conf, verbose=False, half=False, imgsz=640)
+        res = models_dict["face"](image, conf=conf, verbose=False, half=False, imgsz=640)
         for r in res:
             for box in r.boxes:
                 if int(box.cls[0]) == 0:
@@ -77,7 +77,7 @@ def process_frame(image, models_dict, targets, conf, mode, intensity):
 
     # Сбор рамок от модели NSFW
     if "NSFW" in targets and "nsfw" in models_dict:
-        res = models_dict["nsfw"](img_array, conf=conf, verbose=False, half=False, imgsz=640)
+        res = models_dict["nsfw"](image, conf=conf, verbose=False, half=False, imgsz=640)
         for r in res:
             for box in r.boxes:
                 # Здесь нужно указать индексы классов твоей NSFW модели
