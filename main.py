@@ -130,7 +130,7 @@ def main():
     uploaded_file = st.file_uploader("Загрузите фото", type=["jpg", "jpeg", "png"])
 
     if uploaded_file:
-        input_img = Image.open(uploaded_file).convert("RGB")
+        input_img = Image.open(uploaded_file).convert("BGR")
         
         col1, col2 = st.columns(2)
         with col1:
