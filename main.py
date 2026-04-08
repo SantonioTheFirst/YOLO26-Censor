@@ -62,7 +62,7 @@ def apply_solid(roi):
 
 # --- 3. Главная функция обработки ---
 def process_frame(image, models_dict, targets, conf, mode, intensity):
-    img_array = np.array(image) # PIL (RGB) -> NumPy (RGB)
+    img_array = image # PIL (RGB) -> NumPy (RGB)
     h, w = img_array.shape[:2]
     all_boxes = []
 
@@ -130,7 +130,7 @@ def main():
     uploaded_file = st.file_uploader("Загрузите фото", type=["jpg", "jpeg", "png"])
 
     if uploaded_file:
-        input_img = Image.open(uploaded_file).convert("BGR")
+        input_img = Image.open(uploaded_file)
         
         col1, col2 = st.columns(2)
         with col1:
