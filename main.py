@@ -45,7 +45,7 @@ def apply_pixelate(roi, intensity):
     h, w = roi.shape[:2]
     if h == 0 or w == 0: return roi
     # Вычисляем количество блоков: чем меньше intensity, тем меньше блоков (крупнее пиксель)
-    blocks = int(max(2, 50 * intensity)) 
+    blocks = int(max(2, 50 * (1.0 - intensity)))
     temp = cv2.resize(roi, (blocks, blocks), interpolation=cv2.INTER_LINEAR)
     return cv2.resize(temp, (w, h), interpolation=cv2.INTER_NEAREST)
 
@@ -58,7 +58,7 @@ def apply_blur(roi, intensity):
 
 def apply_solid(roi):
     """Сплошная заливка серым."""
-    return np.full_like(roi, np.median(roi))
+    return np.full_like(roi, (64, 64, 64))
 
 # --- 3. Главная функция обработки ---
 def process_frame(image, models_dict, targets, conf, mode, intensity):
