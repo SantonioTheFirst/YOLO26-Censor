@@ -58,7 +58,7 @@ def apply_blur(roi, intensity):
 
 def apply_solid(roi):
     """Сплошная заливка серым."""
-    return np.full_like(roi, (64, 64, 64))
+    return np.full_like(roi, np.median(roi))
 
 # --- 3. Главная функция обработки ---
 def process_frame(image, models_dict, targets, conf, mode, intensity):
