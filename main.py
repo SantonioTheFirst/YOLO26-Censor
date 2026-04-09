@@ -98,7 +98,7 @@ def process_frame(image, models_dict, targets, conf, mode, intensity):
         elif mode == "Solid":
             img_array[y1:y2, x1:x2] = apply_solid(roi)
 
-    return Image.fromarray(img_array)
+    return Image.fromarray(img_array).convert("RGB")
 
 # --- 4. Интерфейс Streamlit ---
 def main():
@@ -114,7 +114,7 @@ def main():
     with st.sidebar:
         st.header("Настройки")
         targets = st.multiselect("Что скрывать?", ["Лица", "NSFW"], default=["Лица"])
-        conf_val = st.slider("Confidence threshold", 0.1, 1.0, 0.4)
+        conf_val = st.slider("Confidence threshold faces", 0.1, 1.0, 0.4)
         
         st.divider()
         mode = st.radio("Метод цензуры", ["Pixelate", "Blur", "Solid"])
@@ -130,7 +130,7 @@ def main():
     uploaded_file = st.file_uploader("Загрузите фото", type=["jpg", "jpeg", "png"])
 
     if uploaded_file:
-        input_img = Image.open(uploaded_file)
+        input_img = Image.open(uploaded_file).convert("RGB")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -141,7 +141,7 @@ def main():
             st.subheader("Результат")
             with st.spinner("Нейросеть работает..."):
                 output_img = process_frame(input_img, models, targets, conf_val, mode, intensity)
-                st.image(output_img, use_container_width=True, channels="BGR")
+                st.image(output_img, use_container_width=True)
                 
                 # Кнопка скачивания
                 buf = io.BytesIO()
